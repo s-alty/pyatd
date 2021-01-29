@@ -1,3 +1,5 @@
+import collections
+import json
 import logging
 import os
 import signal
@@ -9,6 +11,9 @@ import time
 # TODO: do we want to make this configurable?
 DB_PATH = 'pyat.db'
 
+Job = collections.namedtuple('Job', 'id, command, working_dir, environment')
+
+
 class NoCommands(Exception):
     pass
 
@@ -19,7 +24,7 @@ def ddl(conn):
     c = conn.cursor()
     c.execute('''
          CREATE TABLE IF NOT EXISTS jobs
-         (command TEXT, timestamp DATETIME, working_dir TEXT, was_run BOOLEAN);
+         (command TEXT, timestamp DATETIME, working_dir TEXT, environment TEXT, was_run BOOLEAN);
     ''')
     c.execute('''
         CREATE INDEX IF NOT EXISTS next_command_lookup
@@ -30,7 +35,7 @@ def ddl(conn):
 def get_next_command(conn):
     c = conn.cursor()
     c.execute('''
-       SELECT rowid, command, timestamp, working_dir
+       SELECT rowid, command, timestamp, working_dir, environment
        FROM jobs
        WHERE was_run = 0
        ORDER BY timestamp
@@ -42,15 +47,17 @@ def get_next_command(conn):
     if result is None:
         raise NoCommands
 
-    rowid, command, timestamp, working_dir = tuple(result)
+    rowid, command, timestamp, working_dir, env = tuple(result)
+    environment = json.loads(env)
+
     difference = int(timestamp - time.time())
     time_to_wait = max(0, difference)
-    return rowid, command, time_to_wait, working_dir
+    return Job(rowid, command, working_dir, environment), time_to_wait
 
-def execute_command(conn, id, cmd, working_dir):
+def execute_command(conn, job):
     # start the command in the background, then mark it done
     # this is a critical section so we block reciept of signals here
-    logging.info('executing command: {}'.format(id))
+    logging.info('executing command: {}'.format(job.id))
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
     try:
 
@@ -60,9 +67,8 @@ def execute_command(conn, id, cmd, working_dir):
             # child should start the process then exist
             os.setsid()
             # TODO: Should we redirect stdout to a file? Should we add it to sqlite?
-            # TODO: retain working directory and environment
-            proc = subprocess.Popen(['/bin/sh'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=working_dir)
-            proc.stdin.write(cmd.encode('utf-8'))
+            proc = subprocess.Popen(['/bin/sh'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=job.working_dir, env=job.environment)
+            proc.stdin.write(job.command.encode('utf-8'))
             os._exit(os.EX_OK)
         else:
             # wait for child to exit signifying that the process has been started
@@ -73,9 +79,9 @@ def execute_command(conn, id, cmd, working_dir):
             UPDATE jobs
             SET was_run = 1
             WHERE rowid = ?;
-        ''', (id,))
+        ''', (job.id,))
         conn.commit()
-        logging.info('Marking command run: {}'.format(id))
+        logging.info('Marking command run: {}'.format(job.id))
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
 
@@ -84,15 +90,15 @@ def serve(conn):
     while True:
         try:
             try:
-                id, command, time_to_wait, working_dir = get_next_command(conn)
+                job, time_to_wait = get_next_command(conn)
             except NoCommands:
                 logging.debug("Got no commands")
                 # It's fine to sleep for a long time, we'll get a signal when there's something to do
                 time.sleep(60 * 60 * 30)
             else:
-                logging.info("Sleeping for command: {}".format(id))
+                logging.info("Sleeping for command: {}".format(job.id))
                 time.sleep(time_to_wait)
-                execute_command(conn, id, command, working_dir)
+                execute_command(conn, job)
         except SentCommand:
             # we were sent a new command, so restart the loop to check for the next command
             continue

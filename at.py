@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import glob
+import json
 import os
 import signal
 import sqlite3
@@ -13,14 +14,14 @@ ATD_SENTINAL = b'atd.py'
 class ProcNotFound(Exception):
     pass
 
-def write_job_record(conn, command, ts, working_dir):
+def write_job_record(conn, command, ts, working_dir, environment):
     c = conn.cursor()
     c.execute('''
     INSERT INTO jobs
-    (command, timestamp, working_dir, was_run)
+    (command, timestamp, working_dir, environment, was_run)
     VALUES
-    (?, ?, ?, false)
-    ''', (command, ts, working_dir))
+    (?, ?, ?, ?, false)
+    ''', (command, ts, working_dir, environment))
     conn.commit()
 
 
@@ -57,7 +58,8 @@ if __name__ == '__main__':
 
     conn = sqlite3.connect(DB_PATH)
     working_dir = os.getcwd()
-    write_job_record(conn, cmd, parsed_time, working_dir)
+    environment = json.dumps(dict(os.environ))
+    write_job_record(conn, cmd, parsed_time, working_dir, environment)
 
     # notify atd
     os.kill(atd_pid, signal.SIGUSR1)
