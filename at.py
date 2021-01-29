@@ -13,14 +13,14 @@ ATD_SENTINAL = b'atd.py'
 class ProcNotFound(Exception):
     pass
 
-def write_job_record(conn, command, ts):
+def write_job_record(conn, command, ts, working_dir):
     c = conn.cursor()
     c.execute('''
     INSERT INTO jobs
-    (command, timestamp, was_run)
+    (command, timestamp, working_dir, was_run)
     VALUES
-    (?, ?, false)
-    ''', (command, ts))
+    (?, ?, ?, false)
+    ''', (command, ts, working_dir))
     conn.commit()
 
 
@@ -56,7 +56,8 @@ if __name__ == '__main__':
         sys.exit(1)
 
     conn = sqlite3.connect(DB_PATH)
-    write_job_record(conn, cmd, parsed_time)
+    working_dir = os.getcwd()
+    write_job_record(conn, cmd, parsed_time, working_dir)
 
     # notify atd
     os.kill(atd_pid, signal.SIGUSR1)

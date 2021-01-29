@@ -19,7 +19,7 @@ def ddl(conn):
     c = conn.cursor()
     c.execute('''
          CREATE TABLE IF NOT EXISTS jobs
-         (command TEXT, timestamp DATETIME, was_run BOOLEAN);
+         (command TEXT, timestamp DATETIME, working_dir TEXT, was_run BOOLEAN);
     ''')
     c.execute('''
         CREATE INDEX IF NOT EXISTS next_command_lookup
@@ -30,7 +30,7 @@ def ddl(conn):
 def get_next_command(conn):
     c = conn.cursor()
     c.execute('''
-       SELECT rowid, command, timestamp
+       SELECT rowid, command, timestamp, working_dir
        FROM jobs
        WHERE was_run = 0
        ORDER BY timestamp
@@ -42,12 +42,12 @@ def get_next_command(conn):
     if result is None:
         raise NoCommands
 
-    rowid, command, timestamp = tuple(result)
+    rowid, command, timestamp, working_dir = tuple(result)
     difference = int(timestamp - time.time())
     time_to_wait = max(0, difference)
-    return rowid, command, time_to_wait
+    return rowid, command, time_to_wait, working_dir
 
-def execute_command(conn, id, cmd):
+def execute_command(conn, id, cmd, working_dir):
     # start the command in the background, then mark it done
     # this is a critical section so we block reciept of signals here
     logging.info('executing command: {}'.format(id))
@@ -61,7 +61,7 @@ def execute_command(conn, id, cmd):
             os.setsid()
             # TODO: Should we redirect stdout to a file? Should we add it to sqlite?
             # TODO: retain working directory and environment
-            proc = subprocess.Popen(['/bin/sh'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(['/bin/sh'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=working_dir)
             proc.stdin.write(cmd.encode('utf-8'))
             os._exit(os.EX_OK)
         else:
@@ -84,7 +84,7 @@ def serve(conn):
     while True:
         try:
             try:
-                id, command, time_to_wait = get_next_command(conn)
+                id, command, time_to_wait, working_dir = get_next_command(conn)
             except NoCommands:
                 logging.debug("Got no commands")
                 # It's fine to sleep for a long time, we'll get a signal when there's something to do
@@ -92,7 +92,7 @@ def serve(conn):
             else:
                 logging.info("Sleeping for command: {}".format(id))
                 time.sleep(time_to_wait)
-                execute_command(conn, id, command)
+                execute_command(conn, id, command, working_dir)
         except SentCommand:
             # we were sent a new command, so restart the loop to check for the next command
             continue
